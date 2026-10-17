@@ -211,6 +211,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
+          # Dist output is intentionally excluded from source ZIPs, so discard stale TypeScript build metadata.
+          find . -type f -name '*.tsbuildinfo' -delete
           pnpm run typecheck
 
       - name: Build production web frontend
