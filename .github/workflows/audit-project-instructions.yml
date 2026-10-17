@@ -212,6 +212,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Build and validate Android debug APK
+        id: build_apk
         shell: bash
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
@@ -240,6 +241,7 @@ jobs:
           test -s "$APK"
           file "$APK"
           sha256sum "$APK"
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
           if [ -x "$ANDROID_HOME/build-tools/36.0.0/aapt" ]; then
             "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 8
           elif command -v aapt >/dev/null 2>&1; then
@@ -250,11 +252,11 @@ jobs:
           fi
 
       - name: Upload real Android APK artifact
-        if: always() && ${{ hashFiles('**/android/app/build/outputs/apk/debug/app-debug.apk') != '' }}
+        if: always() && steps.build_apk.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: barakat-chemistry-debug-apk
-          path: ${{ runner.temp }}/uploaded-project/maahd-stdh-brkt-kymy-lsds/artifacts/barakat-chemistry/android/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.build_apk.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
 
