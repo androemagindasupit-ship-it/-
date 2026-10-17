@@ -20,7 +20,6 @@ pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
 deps = pkg.setdefault("dependencies", {})
 deps["@capacitor/camera"] = "8.2.4"
 deps["@capacitor/local-notifications"] = "8.3.1"
-pkg.setdefault("devDependencies", {})["@capacitor/assets"] = "3.0.5"
 pkg_path.write_text(json.dumps(pkg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 assets = frontend / "assets"
@@ -399,7 +398,6 @@ if check_title not in checker:
   }
   if (!icon.includes('#08142C') || !brand.includes('معهد أستاذ بركات') || !app.includes("src={basePath + '/logo.svg'}")) throw new Error('شعار المعهد غير مربوط بالواجهة أو الأيقونة');
   for (const dep of ['@capacitor/camera', '@capacitor/local-notifications']) if (!pkg.dependencies?.[dep]) throw new Error('اعتماد Android مفقود: ' + dep);
-  if (!pkg.devDependencies?.['@capacitor/assets']) throw new Error('مولد موارد أيقونة التطبيق مفقود');
   return 'أيقونة الهوية، معرض الصور، الكاميرا وإذن إشعارات Android موجودة';
 });
 

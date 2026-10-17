@@ -264,6 +264,13 @@ jobs:
           test -x "$SDK_ROOT/build-tools/36.0.0/aapt"
           "$SDKMANAGER" --list_installed | grep -E 'platforms;android-36|build-tools;36.0.0|platform-tools'
 
+      - name: Install SVG renderer and image resizing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq librsvg2-bin imagemagick
+
       - name: Build and validate Android debug APK
         id: build_apk
         shell: bash
@@ -285,8 +292,27 @@ jobs:
           if [ ! -d android ]; then
             pnpm exec cap add android
           fi
-          pnpm exec capacitor-assets generate --android --assetPath assets --iconBackgroundColor '#08142C' --splashBackgroundColor '#08142C'
+          rsvg-convert -w 1024 -h 1024 --output assets/logo-rendered.png assets/logo.svg
+          for pair in "mdpi 48 108" "hdpi 72 162" "xhdpi 96 216" "xxhdpi 144 324" "xxxhdpi 192 432"; do
+            read -r density icon_size foreground_size <<< "$pair"
+            resource_dir="android/app/src/main/res/mipmap-$density"
+            mkdir -p "$resource_dir"
+            convert assets/logo-rendered.png -resize "${icon_size}x${icon_size}!" "$resource_dir/ic_launcher.png"
+            convert assets/logo-rendered.png -resize "${icon_size}x${icon_size}!" "$resource_dir/ic_launcher_round.png"
+            convert assets/logo-rendered.png -resize 80%x80% -gravity center -background '#08142C' -extent "${foreground_size}x${foreground_size}" "$resource_dir/ic_launcher_foreground.png"
+          done
+          mkdir -p android/app/src/main/res/mipmap-anydpi-v26 android/app/src/main/res/values
+          cat > android/app/src/main/res/values/ic_launcher_background.xml <<'XML'
+          <resources><color name="ic_launcher_background">#08142C</color></resources>
+          XML
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>
+          XML
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'XML'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>
+          XML
           test -s android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          test -s android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png
           pnpm exec cap sync android
           cd android
           chmod +x ./gradlew
