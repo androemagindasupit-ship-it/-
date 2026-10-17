@@ -12,7 +12,7 @@ permissions:
 jobs:
   inspect-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,9 +35,7 @@ jobs:
           out = Path(os.environ["RUNNER_TEMP"]) / "uploaded-project"
           out.mkdir(parents=True, exist_ok=True)
 
-          MAX_ENTRIES = 50000
-          MAX_TOTAL = 500 * 1024 * 1024
-          MAX_SINGLE = 150 * 1024 * 1024
+          MAX_ENTRIES, MAX_TOTAL, MAX_SINGLE = 50000, 500 * 1024 * 1024, 150 * 1024 * 1024
           total, count = 0, 0
           instructions, all_names = [], []
           def normalize(s):
@@ -73,10 +71,8 @@ jobs:
                   if is_instruction(info.filename):
                       try:
                           raw = zf.read(info)
-                          try:
-                              decoded = raw.decode("utf-8-sig")
-                          except UnicodeDecodeError:
-                              decoded = raw.decode("cp1256", errors="replace")
+                          try: decoded = raw.decode("utf-8-sig")
+                          except UnicodeDecodeError: decoded = raw.decode("cp1256", errors="replace")
                           instructions.append((info.filename, decoded))
                       except Exception as exc:
                           instructions.append((info.filename, f"[READ ERROR: {type(exc).__name__}]"))
@@ -84,16 +80,14 @@ jobs:
                       with zf.open(info) as src, target.open("wb") as dst:
                           while True:
                               chunk = src.read(1024 * 1024)
-                              if not chunk:
-                                  break
+                              if not chunk: break
                               dst.write(chunk)
                   except Exception as exc:
                       print("EXTRACTION_ERROR:", info.filename, type(exc).__name__)
                       raise
           print(f"ARCHIVE: {archive.name}; FILES: {count}; DECLARED_UNCOMPRESSED_BYTES: {total}")
           print("\nARCHIVE_PATHS (up to 2500):")
-          for name in all_names[:2500]:
-              print(name)
+          for name in all_names[:2500]: print(name)
           print("\nINSTRUCTION_FILES_FOUND:", len(instructions))
           for name, body in instructions:
               print("\n" + "=" * 24 + " " + name + " " + "=" * 24)
@@ -107,41 +101,43 @@ jobs:
               dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "dist", "build", ".gradle"}]
               here = Path(base)
               score = 0
+              if "pnpm-workspace.yaml" in files: score += 100
+              if "pnpm-lock.yaml" in files and "package.json" in files: score += 60
               if "package.json" in files: score += 10
               if "gradlew" in files: score += 8
               if "settings.gradle" in files or "settings.gradle.kts" in files: score += 5
               if "vite.config.ts" in files or "vite.config.js" in files: score += 2
               if "README.md" in files or "readme.md" in files: score += 1
-              if score:
-                  candidates.append((score, -len(here.parts), here))
+              if score: candidates.append((score, -len(here.parts), here))
           project = max(candidates, default=(0, 0, out), key=lambda t: (t[0], t[1]))[2]
-          print("\nDETECTED_PROJECT_ROOT:", project)
-          print("PROJECT_ROOT_FILES:")
+          print("\nDETECTED_WORKSPACE_ROOT:", project)
+          print("WORKSPACE_ROOT_FILES:")
           for p in sorted(project.iterdir(), key=lambda p: p.name.casefold())[:500]:
               print(("DIR " if p.is_dir() else "FILE ") + p.name)
 
           safe_names = {
-              "package.json", "readme.md", "readme", "build.md", "capacitor.config.json",
+              "package.json", "readme.md", "readme", "build.md", "database.md",
+              "engineering_progress_report.md", "project_audit.md", "setup.md",
+              "deployment.md", "auth_setup.md", "replit.md", "capacitor.config.json",
               "capacitor.config.ts", "capacitor.config.js", "vite.config.ts", "vite.config.js",
               "next.config.js", "next.config.mjs", "next.config.ts", "angular.json",
               "manifest.json", "app.json", "pubspec.yaml", "requirements.txt",
               "pyproject.toml", "settings.gradle", "settings.gradle.kts", "build.gradle",
-              "build.gradle.kts", "gradle-wrapper.properties", "pom.xml",
+              "build.gradle.kts", "gradle-wrapper.properties", "pom.xml", "pnpm-workspace.yaml",
+              "tsconfig.json", "tsconfig.base.json",
           }
           sensitive_key = re.compile(r"(secret|token|password|passwd|credential|private.?key|api.?key|client.?secret)", re.I)
           def redact(obj):
               if isinstance(obj, dict):
                   return {k: ("[REDACTED]" if sensitive_key.search(str(k)) else redact(v)) for k, v in obj.items()}
-              if isinstance(obj, list):
-                  return [redact(x) for x in obj]
+              if isinstance(obj, list): return [redact(x) for x in obj]
               return obj
-          print("\nKEY_MANIFESTS:")
+          print("\nKEY_MANIFESTS_AND_DOCUMENTATION:")
           printed = 0
           for p in sorted(project.rglob("*"), key=lambda p: str(p).casefold()):
               if not p.is_file() or any(part in {"node_modules", ".git", "dist", "build", ".gradle"} for part in p.parts):
                   continue
-              if p.name.casefold() not in safe_names:
-                  continue
+              if p.name.casefold() not in safe_names: continue
               if p.stat().st_size > 128 * 1024:
                   print(f"SKIP_LARGE_MANIFEST: {p.relative_to(project)} ({p.stat().st_size} bytes)")
                   continue
@@ -153,56 +149,77 @@ jobs:
               print(f"--- {p.relative_to(project)} ---")
               print(data[:20000])
               printed += 1
-              if printed >= 40:
-                  print("MANIFEST_OUTPUT_TRUNCATED_AFTER_40_FILES")
+              if printed >= 60:
+                  print("MANIFEST_OUTPUT_TRUNCATED_AFTER_60_FILES")
                   break
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               env.write("PROJECT_ROOT=" + str(project) + "\n")
           PY
+
+      - name: Upload inspected source for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspected-project-source
+          path: ${{ runner.temp }}/uploaded-project/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install dependencies and run discovered Node checks
+      - name: Install workspace dependencies and run checks
         shell: bash
         run: |
           set -uo pipefail
           cd "$PROJECT_ROOT"
+          status=0
           if [ ! -f package.json ]; then
-            echo "No package.json at detected root; Node checks are not applicable."
-            exit 0
-          fi
-          node -e 'const p=require("./package.json"); console.log("Package:",p.name||"(unnamed)"); console.log("Scripts:",JSON.stringify(p.scripts||{}));'
-          if [ -f pnpm-lock.yaml ]; then
-            corepack enable
-            corepack prepare pnpm@10.26.1 --activate
-            pnpm install --frozen-lockfile
-            PM=pnpm
-          elif [ -f yarn.lock ]; then
-            corepack enable
-            yarn install --immutable
-            PM=yarn
-          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-            npm ci
-            PM=npm
-          else
-            echo "BLOCKER: package.json exists but no recognized lockfile is present; refusing nondeterministic install."
+            echo "BLOCKER: no workspace package.json at detected root."
             exit 1
           fi
-          status=0
-          for script in typecheck check lint test build; do
-            if node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]] ? 0 : 1)' "$script"; then
-              echo "=== RUN $PM $script ==="
-              "$PM" run "$script" || status=1
-            else
-              echo "SKIP: package script '$script' not defined."
-            fi
-          done
+          if [ -f pnpm-workspace.yaml ] && [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            corepack prepare pnpm@10.26.1 --activate
+            pnpm install --frozen-lockfile || { echo "FAIL: pnpm install --frozen-lockfile"; status=1; }
+            for script in typecheck check lint test build; do
+              echo "=== Workspace recursive script: $script ==="
+              pnpm -r --if-present run "$script" || status=1
+            done
+            echo "=== Explicit Barakat Chemistry web build ==="
+            pnpm --filter @workspace/barakat-chemistry run build || status=1
+            echo "=== Explicit API server build, if defined ==="
+            pnpm --filter @workspace/api-server --if-present run build || status=1
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            corepack prepare pnpm@10.26.1 --activate
+            pnpm install --frozen-lockfile || status=1
+            for script in typecheck check lint test build; do
+              pnpm -r --if-present run "$script" || status=1
+            done
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --immutable || status=1
+            for script in typecheck check lint test build; do yarn run "$script" || status=1; done
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci || status=1
+            for script in typecheck check lint test build; do
+              if node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]] ? 0 : 1)' "$script"; then
+                npm run "$script" || status=1
+              else
+                echo "SKIP: $script not defined."
+              fi
+            done
+          else
+            echo "BLOCKER: no recognized package lockfile found."
+            exit 1
+          fi
           exit "$status"
 
-      - name: Set up Java for Android build
+      - name: Set up Java for existing Android project
         if: ${{ hashFiles('**/gradlew') != '' }}
         uses: actions/setup-java@v4
         with:
