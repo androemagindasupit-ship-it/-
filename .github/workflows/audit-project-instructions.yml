@@ -1,0 +1,132 @@
+name: Audit uploaded project instructions
+
+on:
+  push:
+    branches:
+      - "audit/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-instructions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate and print instruction files only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import io
+          import os
+          import unicodedata
+          import zipfile
+          from pathlib import Path
+
+          archive_paths = [p for p in Path(".").iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
+          print("TOP_LEVEL_FILES:")
+          for p in sorted(Path(".").iterdir(), key=lambda x: x.name.casefold()):
+              print(("DIR " if p.is_dir() else "FILE ") + p.name)
+          if not archive_paths:
+              print("ERROR: No top-level ZIP archive was found.")
+              raise SystemExit(2)
+
+          targets = []
+          seen_archives = set()
+          total_uncompressed = 0
+          max_total_uncompressed = 300 * 1024 * 1024
+          max_instruction_size = 1024 * 1024
+
+          def norm(s):
+              s = unicodedata.normalize("NFKC", s).casefold()
+              return "".join(ch for ch in s if ch.isalnum())
+
+          def is_target(name):
+              n = norm(Path(name).name)
+              return name.lower().endswith(".txt") and (
+                  "معلوماتالتطبيق" in n or "نصملصق" in n
+              )
+
+          def scan_zip(data, label, depth=0):
+              global total_uncompressed
+              if depth > 3:
+                  print(f"SKIP nested archive beyond depth limit: {label}")
+                  return
+              try:
+                  zf = zipfile.ZipFile(io.BytesIO(data))
+              except (zipfile.BadZipFile, OSError) as exc:
+                  print(f"NOT_A_ZIP: {label}: {type(exc).__name__}")
+                  return
+              with zf:
+                  for info in zf.infolist():
+                      if info.is_dir():
+                          continue
+                      total_uncompressed += info.file_size
+                      if total_uncompressed > max_total_uncompressed:
+                          print("STOP: total declared uncompressed archive content exceeds safety limit.")
+                          return
+                      member = info.filename
+                      full = f"{label}!/{member}"
+                      if is_target(member):
+                          if info.file_size > max_instruction_size:
+                              targets.append((full, None, "File exceeds 1 MiB safety limit"))
+                          else:
+                              try:
+                                  raw = zf.read(info)
+                                  targets.append((full, raw, None))
+                              except Exception as exc:
+                                  targets.append((full, None, f"Could not read entry ({type(exc).__name__})"))
+                      elif member.lower().endswith(".zip") and info.file_size <= 50 * 1024 * 1024:
+                          try:
+                              nested = zf.read(info)
+                              signature = nested[:4]
+                              if signature.startswith(b"PK"):
+                                  key = (full, len(nested))
+                                  if key not in seen_archives:
+                                      seen_archives.add(key)
+                                      scan_zip(nested, full, depth + 1)
+                          except Exception as exc:
+                              print(f"NESTED_ARCHIVE_READ_ERROR: {full}: {type(exc).__name__}")
+
+          for path in archive_paths:
+              try:
+                  scan_zip(path.read_bytes(), str(path))
+              except OSError as exc:
+                  print(f"ARCHIVE_READ_ERROR: {path.name}: {type(exc).__name__}")
+
+          print("\nINSTRUCTION_FILE_COUNT:", len(targets))
+          for name, raw, error in targets:
+              print("\n" + "=" * 24 + " INSTRUCTION FILE " + "=" * 24)
+              print("PATH:", name)
+              if error:
+                  print("ERROR:", error)
+                  continue
+              try:
+                  text = raw.decode("utf-8-sig")
+              except UnicodeDecodeError:
+                  try:
+                      text = raw.decode("cp1256")
+                  except UnicodeDecodeError:
+                      text = raw.decode("utf-8", errors="replace")
+              print(text)
+              print("\n" + "=" * 68)
+
+          if not targets:
+              candidates = []
+              for path in archive_paths:
+                  try:
+                      with zipfile.ZipFile(path) as zf:
+                          candidates.extend(i.filename for i in zf.infolist()
+                                           if not i.is_dir() and i.filename.lower().endswith(".txt"))
+                  except Exception:
+                      pass
+              print("NO_MATCHING_INSTRUCTION_FILES_FOUND.")
+              print("TXT_CANDIDATES:")
+              for name in candidates[:250]:
+                  print(name)
+              raise SystemExit(3)
+          PY
