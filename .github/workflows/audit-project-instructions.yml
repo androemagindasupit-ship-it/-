@@ -225,8 +225,28 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK platform and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="\${ANDROID_HOME:-\${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          test -d "$SDK_ROOT" || { echo "Android SDK root not found: $SDK_ROOT"; exit 1; }
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -x "$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager"
+          else
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          test -n "$SDKMANAGER" && test -x "$SDKMANAGER" || { echo "Android SDK manager was not found under $SDK_ROOT"; exit 1; }
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          test -d "$SDK_ROOT/platforms/android-36"
+          test -x "$SDK_ROOT/build-tools/36.0.0/aapt"
+          "$SDKMANAGER" --list_installed | grep -E 'platforms;android-36|build-tools;36.0.0|platform-tools'
 
       - name: Build and validate Android debug APK
         id: build_apk
@@ -237,7 +257,6 @@ jobs:
           VITE_CLERK_PROXY_URL: ${{ vars.VITE_CLERK_PROXY_URL }}
         run: |
           set -euo pipefail
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
           cd "$PROJECT_ROOT/artifacts/barakat-chemistry"
           if [ -n "$VITE_API_BASE_URL" ] && [ -n "$VITE_CLERK_PUBLISHABLE_KEY" ]; then
             export VITE_MOBILE_PREVIEW=false
@@ -260,9 +279,9 @@ jobs:
           sha256sum "$APK"
           echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
           if [ -x "$ANDROID_HOME/build-tools/36.0.0/aapt" ]; then
-            "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 8
+            "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | sed -n '1,8p'
           elif command -v aapt >/dev/null 2>&1; then
-            aapt dump badging "$APK" | head -n 8
+            aapt dump badging "$APK" | sed -n '1,8p'
           else
             echo "ERROR: APK built but aapt validation tool is unavailable."
             exit 1
