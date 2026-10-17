@@ -1,4 +1,4 @@
-name: Audit uploaded project instructions
+name: Inspect and validate uploaded project
 
 on:
   push:
@@ -10,123 +10,220 @@ permissions:
   contents: read
 
 jobs:
-  inspect-instructions:
+  inspect-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate and print instruction files only
+      - name: Safely unpack and inspect source archive
+        id: inspect
         shell: bash
         run: |
           python3 - <<'PY'
-          import io
-          import os
-          import unicodedata
-          import zipfile
-          from pathlib import Path
+          import json, os, re, stat, unicodedata, zipfile
+          from pathlib import Path, PurePosixPath
 
-          archive_paths = [p for p in Path(".").iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
-          print("TOP_LEVEL_FILES:")
-          for p in sorted(Path(".").iterdir(), key=lambda x: x.name.casefold()):
+          roots = [p for p in Path(".").iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
+          print("REPOSITORY_TOP_LEVEL:")
+          for p in sorted(Path(".").iterdir(), key=lambda p: p.name.casefold()):
               print(("DIR " if p.is_dir() else "FILE ") + p.name)
-          if not archive_paths:
-              print("ERROR: No top-level ZIP archive was found.")
-              raise SystemExit(2)
+          if len(roots) != 1:
+              raise SystemExit(f"Expected exactly one top-level ZIP archive, found {len(roots)}")
+          archive = roots[0]
+          out = Path(os.environ["RUNNER_TEMP"]) / "uploaded-project"
+          out.mkdir(parents=True, exist_ok=True)
 
-          targets = []
-          seen_archives = set()
-          total_uncompressed = 0
-          max_total_uncompressed = 300 * 1024 * 1024
-          max_instruction_size = 1024 * 1024
-
-          def norm(s):
+          MAX_ENTRIES = 50000
+          MAX_TOTAL = 500 * 1024 * 1024
+          MAX_SINGLE = 150 * 1024 * 1024
+          total, count = 0, 0
+          instructions, all_names = [], []
+          def normalize(s):
               s = unicodedata.normalize("NFKC", s).casefold()
               return "".join(ch for ch in s if ch.isalnum())
-
-          def is_target(name):
-              n = norm(Path(name).name)
-              return name.lower().endswith(".txt") and (
-                  "معلوماتالتطبيق" in n or "نصملصق" in n
+          def is_instruction(p):
+              name = normalize(PurePosixPath(p).name)
+              return PurePosixPath(p).suffix.casefold() == ".txt" and (
+                  "معلوماتالتطبيق" in name or "نصملصق" in name
               )
-
-          def scan_zip(data, label, depth=0):
-              global total_uncompressed
-              if depth > 3:
-                  print(f"SKIP nested archive beyond depth limit: {label}")
-                  return
-              try:
-                  zf = zipfile.ZipFile(io.BytesIO(data))
-              except (zipfile.BadZipFile, OSError) as exc:
-                  print(f"NOT_A_ZIP: {label}: {type(exc).__name__}")
-                  return
-              with zf:
-                  for info in zf.infolist():
-                      if info.is_dir():
-                          continue
-                      total_uncompressed += info.file_size
-                      if total_uncompressed > max_total_uncompressed:
-                          print("STOP: total declared uncompressed archive content exceeds safety limit.")
-                          return
-                      member = info.filename
-                      full = f"{label}!/{member}"
-                      if is_target(member):
-                          if info.file_size > max_instruction_size:
-                              targets.append((full, None, "File exceeds 1 MiB safety limit"))
-                          else:
-                              try:
-                                  raw = zf.read(info)
-                                  targets.append((full, raw, None))
-                              except Exception as exc:
-                                  targets.append((full, None, f"Could not read entry ({type(exc).__name__})"))
-                      elif member.lower().endswith(".zip") and info.file_size <= 50 * 1024 * 1024:
+          with zipfile.ZipFile(archive) as zf:
+              infos = zf.infolist()
+              if len(infos) > MAX_ENTRIES:
+                  raise SystemExit(f"Archive contains too many entries: {len(infos)}")
+              for info in infos:
+                  if info.is_dir():
+                      continue
+                  count += 1
+                  total += info.file_size
+                  all_names.append(info.filename)
+                  if info.file_size > MAX_SINGLE or total > MAX_TOTAL:
+                      raise SystemExit("Archive exceeds safety limits; no files extracted.")
+                  path = PurePosixPath(info.filename)
+                  if path.is_absolute() or ".." in path.parts:
+                      print("SKIP_UNSAFE_PATH:", info.filename)
+                      continue
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if mode == stat.S_IFLNK:
+                      print("SKIP_SYMLINK:", info.filename)
+                      continue
+                  target = out.joinpath(*path.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  if is_instruction(info.filename):
+                      try:
+                          raw = zf.read(info)
                           try:
-                              nested = zf.read(info)
-                              signature = nested[:4]
-                              if signature.startswith(b"PK"):
-                                  key = (full, len(nested))
-                                  if key not in seen_archives:
-                                      seen_archives.add(key)
-                                      scan_zip(nested, full, depth + 1)
-                          except Exception as exc:
-                              print(f"NESTED_ARCHIVE_READ_ERROR: {full}: {type(exc).__name__}")
+                              decoded = raw.decode("utf-8-sig")
+                          except UnicodeDecodeError:
+                              decoded = raw.decode("cp1256", errors="replace")
+                          instructions.append((info.filename, decoded))
+                      except Exception as exc:
+                          instructions.append((info.filename, f"[READ ERROR: {type(exc).__name__}]"))
+                  try:
+                      with zf.open(info) as src, target.open("wb") as dst:
+                          while True:
+                              chunk = src.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              dst.write(chunk)
+                  except Exception as exc:
+                      print("EXTRACTION_ERROR:", info.filename, type(exc).__name__)
+                      raise
+          print(f"ARCHIVE: {archive.name}; FILES: {count}; DECLARED_UNCOMPRESSED_BYTES: {total}")
+          print("\nARCHIVE_PATHS (up to 2500):")
+          for name in all_names[:2500]:
+              print(name)
+          print("\nINSTRUCTION_FILES_FOUND:", len(instructions))
+          for name, body in instructions:
+              print("\n" + "=" * 24 + " " + name + " " + "=" * 24)
+              print(body)
+              print("=" * 70)
+          if not instructions:
+              print("NOTICE: Neither requested instructions filename was present in the uploaded archive.")
 
-          for path in archive_paths:
-              try:
-                  scan_zip(path.read_bytes(), str(path))
-              except OSError as exc:
-                  print(f"ARCHIVE_READ_ERROR: {path.name}: {type(exc).__name__}")
+          candidates = []
+          for base, dirs, files in os.walk(out):
+              dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "dist", "build", ".gradle"}]
+              here = Path(base)
+              score = 0
+              if "package.json" in files: score += 10
+              if "gradlew" in files: score += 8
+              if "settings.gradle" in files or "settings.gradle.kts" in files: score += 5
+              if "vite.config.ts" in files or "vite.config.js" in files: score += 2
+              if "README.md" in files or "readme.md" in files: score += 1
+              if score:
+                  candidates.append((score, -len(here.parts), here))
+          project = max(candidates, default=(0, 0, out), key=lambda t: (t[0], t[1]))[2]
+          print("\nDETECTED_PROJECT_ROOT:", project)
+          print("PROJECT_ROOT_FILES:")
+          for p in sorted(project.iterdir(), key=lambda p: p.name.casefold())[:500]:
+              print(("DIR " if p.is_dir() else "FILE ") + p.name)
 
-          print("\nINSTRUCTION_FILE_COUNT:", len(targets))
-          for name, raw, error in targets:
-              print("\n" + "=" * 24 + " INSTRUCTION FILE " + "=" * 24)
-              print("PATH:", name)
-              if error:
-                  print("ERROR:", error)
+          safe_names = {
+              "package.json", "readme.md", "readme", "build.md", "capacitor.config.json",
+              "capacitor.config.ts", "capacitor.config.js", "vite.config.ts", "vite.config.js",
+              "next.config.js", "next.config.mjs", "next.config.ts", "angular.json",
+              "manifest.json", "app.json", "pubspec.yaml", "requirements.txt",
+              "pyproject.toml", "settings.gradle", "settings.gradle.kts", "build.gradle",
+              "build.gradle.kts", "gradle-wrapper.properties", "pom.xml",
+          }
+          sensitive_key = re.compile(r"(secret|token|password|passwd|credential|private.?key|api.?key|client.?secret)", re.I)
+          def redact(obj):
+              if isinstance(obj, dict):
+                  return {k: ("[REDACTED]" if sensitive_key.search(str(k)) else redact(v)) for k, v in obj.items()}
+              if isinstance(obj, list):
+                  return [redact(x) for x in obj]
+              return obj
+          print("\nKEY_MANIFESTS:")
+          printed = 0
+          for p in sorted(project.rglob("*"), key=lambda p: str(p).casefold()):
+              if not p.is_file() or any(part in {"node_modules", ".git", "dist", "build", ".gradle"} for part in p.parts):
                   continue
-              try:
-                  text = raw.decode("utf-8-sig")
-              except UnicodeDecodeError:
-                  try:
-                      text = raw.decode("cp1256")
-                  except UnicodeDecodeError:
-                      text = raw.decode("utf-8", errors="replace")
-              print(text)
-              print("\n" + "=" * 68)
-
-          if not targets:
-              candidates = []
-              for path in archive_paths:
-                  try:
-                      with zipfile.ZipFile(path) as zf:
-                          candidates.extend(i.filename for i in zf.infolist()
-                                           if not i.is_dir() and i.filename.lower().endswith(".txt"))
-                  except Exception:
-                      pass
-              print("NO_MATCHING_INSTRUCTION_FILES_FOUND.")
-              print("TXT_CANDIDATES:")
-              for name in candidates[:250]:
-                  print(name)
-              raise SystemExit(3)
+              if p.name.casefold() not in safe_names:
+                  continue
+              if p.stat().st_size > 128 * 1024:
+                  print(f"SKIP_LARGE_MANIFEST: {p.relative_to(project)} ({p.stat().st_size} bytes)")
+                  continue
+              data = p.read_text(encoding="utf-8", errors="replace")
+              if p.name.casefold() == "package.json":
+                  try: data = json.dumps(redact(json.loads(data)), ensure_ascii=False, indent=2)
+                  except Exception: data = "[package.json is not valid JSON]"
+              data = re.sub(r'(?im)^([ \t]*[^\n=]*(?:secret|token|password|api[_-]?key|private[_-]?key)[^\n=]*[=:][ \t]*)([^\n]+)', r'\1[REDACTED]', data)
+              print(f"--- {p.relative_to(project)} ---")
+              print(data[:20000])
+              printed += 1
+              if printed >= 40:
+                  print("MANIFEST_OUTPUT_TRUNCATED_AFTER_40_FILES")
+                  break
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write("PROJECT_ROOT=" + str(project) + "\n")
           PY
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies and run discovered Node checks
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$PROJECT_ROOT"
+          if [ ! -f package.json ]; then
+            echo "No package.json at detected root; Node checks are not applicable."
+            exit 0
+          fi
+          node -e 'const p=require("./package.json"); console.log("Package:",p.name||"(unnamed)"); console.log("Scripts:",JSON.stringify(p.scripts||{}));'
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            corepack prepare pnpm@10.26.1 --activate
+            pnpm install --frozen-lockfile
+            PM=pnpm
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --immutable
+            PM=yarn
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci
+            PM=npm
+          else
+            echo "BLOCKER: package.json exists but no recognized lockfile is present; refusing nondeterministic install."
+            exit 1
+          fi
+          status=0
+          for script in typecheck check lint test build; do
+            if node -e 'process.exit((require("./package.json").scripts||{})[process.argv[1]] ? 0 : 1)' "$script"; then
+              echo "=== RUN $PM $script ==="
+              "$PM" run "$script" || status=1
+            else
+              echo "SKIP: package script '$script' not defined."
+            fi
+          done
+          exit "$status"
+
+      - name: Set up Java for Android build
+        if: ${{ hashFiles('**/gradlew') != '' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build existing Android project
+        if: ${{ hashFiles('**/gradlew') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APKs if a build succeeded
+        if: ${{ success() && hashFiles('**/build/outputs/apk/**/*.apk') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: |
+            **/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
