@@ -191,15 +191,32 @@ jobs:
           pnpm install --no-frozen-lockfile
           pnpm install --frozen-lockfile
 
-      - name: Run current project checks and compile frontend/API
+      - name: Run repository static checks
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
           node scripts/check-project.mjs
+
+      - name: Typecheck workspace projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
           pnpm run typecheck
-          pnpm run build
+
+      - name: Build production web frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
           pnpm --filter @workspace/barakat-chemistry run build
+
+      - name: Build existing API server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
           pnpm --filter @workspace/api-server run build
 
       - name: Set up Java 21
@@ -308,12 +325,3 @@ jobs:
           git commit -m "Repair Barakat app and add Android APK support [skip ci]"
           git push origin "HEAD:$GITHUB_REF_NAME"
 
-      - name: Upload source snapshot for diagnosis
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: barakat-project-audit-source
-          path: ${{ runner.temp }}/uploaded-project/
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
