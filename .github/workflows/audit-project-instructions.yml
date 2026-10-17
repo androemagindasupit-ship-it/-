@@ -225,11 +225,17 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Bootstrap Android command-line tools (legacy package issue tolerated)
+        uses: android-actions/setup-android@v3
+        continue-on-error: true
+
       - name: Install Android SDK platform and build tools
         shell: bash
         run: |
           set -euo pipefail
-          SDK_ROOT="\${ANDROID_HOME:-\${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDK_ROOT="$(printenv ANDROID_HOME || true)"
+          if [ -z "$SDK_ROOT" ]; then SDK_ROOT="$(printenv ANDROID_SDK_ROOT || true)"; fi
+          if [ -z "$SDK_ROOT" ]; then SDK_ROOT=/usr/local/lib/android/sdk; fi
           test -d "$SDK_ROOT" || { echo "Android SDK root not found: $SDK_ROOT"; exit 1; }
           if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
             SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
