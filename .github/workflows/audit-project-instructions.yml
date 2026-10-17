@@ -170,7 +170,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/.github/scripts/prepare-android-build-v3.py" "$PROJECT_ROOT"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/prepare-android-build-v4.py" "$PROJECT_ROOT"
           ARCHIVE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name '*.zip' -print -quit)"
           test -n "$ARCHIVE"
           echo "SOURCE_ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
