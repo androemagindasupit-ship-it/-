@@ -176,6 +176,14 @@ jobs:
           echo "SOURCE_ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
           test -s "$PROJECT_ROOT/artifacts/barakat-chemistry/capacitor.config.ts"
 
+      - name: Apply Android branding, gallery camera picker and notification permission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/.github/scripts/patch-native-mobile.py" "$PROJECT_ROOT"
+          test -s "$PROJECT_ROOT/artifacts/barakat-chemistry/assets/logo.svg"
+          grep -q 'NativeCamera.pickImages' "$PROJECT_ROOT/artifacts/barakat-chemistry/src/App.tsx"
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -275,6 +283,8 @@ jobs:
           if [ ! -d android ]; then
             pnpm exec cap add android
           fi
+          pnpm exec capacitor-assets generate --android --assetPath assets --iconBackgroundColor '#08142C' --splashBackgroundColor '#08142C'
+          test -s android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           pnpm exec cap sync android
           cd android
           chmod +x ./gradlew
